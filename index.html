@@ -380,18 +380,32 @@ for (let i=2;i<=6;i++){
 }
 root.append(collapseCard(6, 'อุปกรณ์ที่ยืมเพิ่มเติม (ไม่บังคับ)', '', [equipBody], false));
 
-// ---- 7. Signature ----
+// ---- 7. Signature (2 people, locked mapping) ----
 const sigCard = el('div', {class:'card'});
-sigCard.append(el('h2', {}, el('span',{class:'step-no'},'7'), 'ลายเซ็นผู้ใช้ (เซ็นออนไลน์)'));
-sigCard.append(el('p', {class:'sub'}, 'ลายเซ็นจะถูกฝังลงในเอกสาร "Accept Regulation (New)" อัตโนมัติเมื่อ Export'));
-const sigWrap = el('div', {class:'sig-wrap'});
-const canvas = el('canvas', {id:'sigPad'});
-sigWrap.append(canvas);
-sigCard.append(sigWrap);
-const sigTools = el('div', {class:'sig-tools'});
-const btnClearSig = el('button', {class:'btn-mini', type:'button'}, 'ล้างลายเซ็น');
-sigTools.append(btnClearSig);
-sigCard.append(sigTools);
+sigCard.append(el('h2', {}, el('span',{class:'step-no'},'7'), 'ลายเซ็นออนไลน์ (2 คน)'));
+sigCard.append(el('p', {class:'sub'}, 'ลายเซ็นแต่ละคนจะถูกฝังลงในตำแหน่งที่ตรงกันทั้ง 3 เอกสารโดยอัตโนมัติ ตามผังนี้:'));
+
+const mapTable = el('div', {class:'note-box', style:'margin-bottom:16px'});
+mapTable.innerHTML = `
+  <b>1) ผู้ใช้</b> = ผู้รับโอน/Transfer = ลายเซ็นผู้ยืม/ผู้คืน<br>
+  <b>2) พนง.IT ผู้ดำเนินการ</b> = ผู้โอน/Transfer = ลายเซ็นผู้อนุมัติ/ผู้รับคืน`;
+sigCard.append(mapTable);
+
+function buildSigBlock(labelText, canvasId, clearBtnId){
+  const w = el('div', {style:'margin-bottom:18px'});
+  w.append(el('label', {style:'display:block;margin-bottom:6px'}, labelText));
+  const sw = el('div', {class:'sig-wrap'});
+  sw.append(el('canvas', {id:canvasId}));
+  w.append(sw);
+  const tools = el('div', {class:'sig-tools'});
+  const btn = el('button', {class:'btn-mini', type:'button', id:clearBtnId}, 'ล้างลายเซ็น');
+  tools.append(btn);
+  w.append(tools);
+  return w;
+}
+sigCard.append(buildSigBlock('1) ลายเซ็นผู้ใช้ (ผู้รับโอน / ผู้ยืม-คืน)', 'sigPadUser', 'btnClearSigUser'));
+sigCard.append(buildSigBlock('2) ลายเซ็น พนง.IT ผู้ดำเนินการ (ผู้โอน / ผู้อนุมัติ)', 'sigPadIT', 'btnClearSigIT'));
+sigCard.append(field({id:'itStaffName', label:'ชื่อ พนง.IT ผู้ดำเนินการ', opt:true, placeholder:'ค่าเริ่มต้นจากต้นฉบับ: โสธร', full:true}));
 root.append(sigCard);
 
 /* ===================== live preview ===================== */
@@ -421,27 +435,30 @@ function updatePreviews(){
 });
 updatePreviews();
 
-/* ===================== signature pad ===================== */
-let sigCtx, drawing = false, sigHasContent = false;
-function setupSignaturePad(){
-  const cvs = $('#sigPad');
+/* ===================== signature pads (user + IT staff) ===================== */
+const sigPads = {}; // { user: {ctx, hasContent}, it: {ctx, hasContent} }
+
+function setupSignaturePad(canvasId, key){
+  const cvs = $('#'+canvasId);
   const ratio = window.devicePixelRatio || 1;
   const rect = cvs.getBoundingClientRect();
   cvs.width = rect.width * ratio;
   cvs.height = rect.height * ratio;
-  sigCtx = cvs.getContext('2d');
-  sigCtx.scale(ratio, ratio);
-  sigCtx.lineWidth = 2.2;
-  sigCtx.lineCap = 'round';
-  sigCtx.strokeStyle = '#1c1f26';
+  const ctx = cvs.getContext('2d');
+  ctx.scale(ratio, ratio);
+  ctx.lineWidth = 2.2;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#1c1f26';
+  sigPads[key] = { ctx, hasContent:false, canvas:cvs };
 
+  let drawing = false;
   const pos = (e) => {
     const r = cvs.getBoundingClientRect();
     const t = e.touches ? e.touches[0] : e;
     return { x: t.clientX - r.left, y: t.clientY - r.top };
   };
-  const start = (e) => { drawing = true; sigHasContent = true; const p = pos(e); sigCtx.beginPath(); sigCtx.moveTo(p.x, p.y); e.preventDefault(); };
-  const move = (e) => { if (!drawing) return; const p = pos(e); sigCtx.lineTo(p.x, p.y); sigCtx.stroke(); e.preventDefault(); };
+  const start = (e) => { drawing = true; sigPads[key].hasContent = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); e.preventDefault(); };
+  const move = (e) => { if (!drawing) return; const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); e.preventDefault(); };
   const end = () => { drawing = false; };
 
   cvs.addEventListener('mousedown', start);
@@ -451,11 +468,14 @@ function setupSignaturePad(){
   cvs.addEventListener('touchmove', move, {passive:false});
   cvs.addEventListener('touchend', end);
 }
-setupSignaturePad();
-btnClearSig.addEventListener('click', () => {
-  const cvs = $('#sigPad');
-  sigCtx.clearRect(0,0,cvs.width,cvs.height);
-  sigHasContent = false;
+setupSignaturePad('sigPadUser', 'user');
+setupSignaturePad('sigPadIT', 'it');
+
+$('#btnClearSigUser').addEventListener('click', () => {
+  const p = sigPads.user; p.ctx.clearRect(0,0,p.canvas.width,p.canvas.height); p.hasContent = false;
+});
+$('#btnClearSigIT').addEventListener('click', () => {
+  const p = sigPads.it; p.ctx.clearRect(0,0,p.canvas.width,p.canvas.height); p.hasContent = false;
 });
 
 /* ===================== validation ===================== */
@@ -515,8 +535,9 @@ $('#btnExport').addEventListener('click', async () => {
     const v = (id) => $('#'+id).value.trim();
 
     info.getCell('D3').value = v('empId') ? Number(v('empId')) || v('empId') : null;
-    if (v('citizenId')) info.getCell('D5').value = v('citizenId');
-    if (v('nickname')){ info.getCell('F6').value = v('nickname'); info.getCell('F7').value = v('nickname'); }
+    info.getCell('D5').value = v('citizenId') || null;
+    info.getCell('F6').value = v('nickname') || null;
+    info.getCell('F7').value = v('nickname') || null;
     info.getCell('D6').value = v('nameTh');
     info.getCell('D7').value = v('nameEn');
     info.getCell('D8').value = v('company');
@@ -532,44 +553,98 @@ $('#btnExport').addEventListener('click', async () => {
       info.getCell('D14').value = v('lotusId');
     }
 
-    if (v('lotusPwd')) info.getCell('D16').value = v('lotusPwd');
-    if (v('webmailPwd')) info.getCell('D18').value = v('webmailPwd');
+    // NOTE: the master template ships with example/placeholder text pre-filled in several
+    // "optional" cells (e.g. D16='รหัส Lotus Note', D26='March 6, 2026', D46-48='ตัวอย่างที่ N').
+    // We must explicitly clear these to null when the field is left blank, otherwise the
+    // template's placeholder text leaks into the exported file looking like real data.
+    info.getCell('D16').value = v('lotusPwd') || null;
+    info.getCell('D18').value = v('webmailPwd') || null;
 
     info.getCell('D20').value = v('compBrand');
     info.getCell('D22').value = v('model');
     info.getCell('D23').value = v('serial');
-    if (v('expressCode')) info.getCell('D24').value = v('expressCode');
+    info.getCell('D24').value = v('expressCode') || null;
     info.getCell('D25').value = v('assetCode');
-    if (v('warrantyDate')) info.getCell('D26').value = fmtWarrantyDate(v('warrantyDate'));
+    info.getCell('D26').value = v('warrantyDate') ? fmtWarrantyDate(v('warrantyDate')) : null;
 
     if (v('startDate')) info.getCell('D28').value = new Date(v('startDate') + 'T00:00:00');
     if (v('receiveDate')) info.getCell('D29').value = new Date(v('receiveDate') + 'T00:00:00');
 
-    if (v('printer')) info.getCell('D31').value = Number(v('printer'));
+    info.getCell('D31').value = v('printer') ? Number(v('printer')) : null;
 
     const deptIdx = (name) => DATA.dept.indexOf(name);
-    if (v('transferFrom')) info.getCell('D37').value = DATA.deptTransfer[deptIdx(v('transferFrom'))] ?? v('transferFrom');
-    if (v('transferTo')) info.getCell('D38').value = DATA.deptTransfer[deptIdx(v('transferTo'))] ?? v('transferTo');
+    info.getCell('D37').value = v('transferFrom') ? (DATA.deptTransfer[deptIdx(v('transferFrom'))] ?? v('transferFrom')) : null;
+    info.getCell('D38').value = v('transferTo') ? (DATA.deptTransfer[deptIdx(v('transferTo'))] ?? v('transferTo')) : null;
     if (v('transferReason')){
       const ri = DATA.reason.indexOf(v('transferReason'));
       info.getCell('D39').value = DATA.reasonValues[ri] ?? v('transferReason');
+    } else {
+      info.getCell('D39').value = null;
     }
 
     for (let i=2;i<=6;i++){
-      const val = v('equip'+i);
-      if (val) info.getCell('D'+(42+i)).value = val;
+      info.getCell('D'+(42+i)).value = v('equip'+i) || null;
     }
 
-    // Signature -> Accept Regulation (New)
-    if (sigHasContent){
-      const cvs = $('#sigPad');
-      const dataUrl = cvs.toDataURL('image/png');
-      const imgId = wb.addImage({ base64: dataUrl, extension: 'png' });
-      const arSheet = wb.getWorksheet('Accept Regulation (New)');
-      if (arSheet){
-        arSheet.addImage(imgId, { tl: { col: 0.2, row: 52.3 }, ext: { width: 170, height: 62 } });
-      }
+    // ---- Fix template bugs in "โอนทรัพย์สิน F." (equipment No./Quantity/Total + row5/6 mapping) ----
+    const tf = wb.getWorksheet('โอนทรัพย์สิน F.');
+    if (tf){
+      tf.getCell('A17').value = { formula: 'IF(ISBLANK(D17),"","1")' };
+      tf.getCell('I17').value = { formula: 'IF(ISBLANK(D17),"",1)' };
+      tf.getCell('I19').value = { formula: 'IF(ISBLANK(D19),"",1)' };
+      tf.getCell('I20').value = { formula: 'IF(ISBLANK(D20),"",1)' };
+      tf.getCell('I21').value = { formula: 'IF(ISBLANK(D21),"",1)' };
+      tf.getCell('D22').value = { formula: 'IF(ISBLANK(Info!D47),"",""&Info!D47)' }; // was wrongly pointing at D48
+      tf.getCell('A22').value = { formula: 'IF(ISBLANK(D22),"",A21+1)' };
+      tf.getCell('I22').value = { formula: 'IF(ISBLANK(D22),"",1)' };
+      tf.getCell('D23').value = { formula: 'IF(ISBLANK(Info!D48),"",""&Info!D48)' }; // was wrongly pointing at non-existent D49
+      tf.getCell('A23').value = { formula: 'IF(ISBLANK(D23),"",A22+1)' };
+      tf.getCell('I23').value = { formula: 'IF(ISBLANK(D23),"",1)' };
+      tf.getCell('I38').value = { formula: 'SUM(I17,I19,I20,I21,I22,I23)' }; // was a hardcoded "4"
     }
+
+    // ---- Optional IT staff name override on Accept Regulation (New) ----
+    const arSheetName = wb.getWorksheet('Accept Regulation (New)');
+    if (arSheetName && v('itStaffName')) arSheetName.getCell('F55').value = v('itStaffName');
+
+    // ---- Signatures: locked 2-person mapping across all 3 forms ----
+    // 1) ผู้ใช้ = ผู้รับโอน/Transfer = ลายเซ็นผู้ยืม/ผู้คืน
+    // 2) พนง.IT ผู้ดำเนินการ = ผู้โอน/Transfer = ลายเซ็นผู้อนุมัติ/ผู้รับคืน
+    function embedSig(padKey, sheetName, anchors){
+      const pad = sigPads[padKey];
+      if (!pad || !pad.hasContent) return;
+      const dataUrl = pad.canvas.toDataURL('image/png');
+      const imgId = wb.addImage({ base64: dataUrl, extension: 'png' });
+      const ws = wb.getWorksheet(sheetName);
+      if (!ws) return;
+      anchors.forEach(a => ws.addImage(imgId, a));
+    }
+
+    // Accept Regulation (New): ผู้ใช้ (A55) / พนง.IT ผู้ดำเนินการ (D55)
+    embedSig('user', 'Accept Regulation (New)', [
+      { tl: { col: 0.2, row: 52.3 }, ext: { width: 150, height: 55 } },
+    ]);
+    embedSig('it', 'Accept Regulation (New)', [
+      { tl: { col: 3.2, row: 52.3 }, ext: { width: 150, height: 55 } },
+    ]);
+
+    // โอนทรัพย์สิน F.: ผู้รับโอน (col I) = user, ผู้โอน (col F/G) = IT staff
+    embedSig('user', 'โอนทรัพย์สิน F.', [
+      { tl: { col: 8.2, row: 39.2 }, ext: { width: 110, height: 42 } },
+    ]);
+    embedSig('it', 'โอนทรัพย์สิน F.', [
+      { tl: { col: 5.2, row: 39.2 }, ext: { width: 110, height: 42 } },
+    ]);
+
+    // ยืม คืน: ลายเซ็นผู้ยืม/ผู้คืน (H41 & K41) = user, ลายเซ็นผู้อนุมัติ/ผู้รับคืน (H44 & K44) = IT staff
+    embedSig('user', 'ยืม คืน', [
+      { tl: { col: 7.1, row: 40.2 }, ext: { width: 65, height: 26 } },
+      { tl: { col: 10.1, row: 40.2 }, ext: { width: 65, height: 26 } },
+    ]);
+    embedSig('it', 'ยืม คืน', [
+      { tl: { col: 7.1, row: 43.2 }, ext: { width: 65, height: 26 } },
+      { tl: { col: 10.1, row: 43.2 }, ext: { width: 65, height: 26 } },
+    ]);
 
     // Keep only the 4 requested sheets
     const keep = new Set(['Info', 'Accept Regulation (New)', 'โอนทรัพย์สิน F.', 'ยืม คืน']);
@@ -603,7 +678,7 @@ $('#btnReset').addEventListener('click', () => {
   $('#startDate').value = todayISO();
   $('#receiveDate').value = todayISO();
   $('#warrantyDate').value = '';
-  const cvs = $('#sigPad'); sigCtx.clearRect(0,0,cvs.width,cvs.height); sigHasContent = false;
+  ['user','it'].forEach(k => { const p = sigPads[k]; if (p){ p.ctx.clearRect(0,0,p.canvas.width,p.canvas.height); p.hasContent = false; } });
   updatePreviews();
   setStatus('');
 });
