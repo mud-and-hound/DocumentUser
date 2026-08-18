@@ -129,7 +129,7 @@
     border:1.5px dashed var(--line); border-radius:8px; background:#fdfdfb; position:relative;
     touch-action:none;
   }
-  canvas#sigPad{width:100%;height:150px;display:block;border-radius:8px;cursor:crosshair;}
+  .sig-wrap canvas{width:100%;height:150px;display:block;border-radius:8px;cursor:crosshair;touch-action:none;}
   .sig-tools{display:flex;gap:8px;margin-top:8px;}
   .btn-mini{
     font-size:12px; border:1px solid var(--line); background:#fff; color:var(--ink-soft);
@@ -372,6 +372,13 @@ root.append(collapseCard(5, 'ใบขอโอนทรัพย์สิน (�
 // ---- 6. Borrowed equipment ----
 const equipBody = el('div', {});
 equipBody.append(el('div', {class:'hint', style:'margin-bottom:10px'}, 'รายการที่ 1 (Model Computer) ระบบดึงจากข้อมูลคอมพิวเตอร์ให้อัตโนมัติแล้ว — เพิ่มรายการอื่น เช่น Adapter, Mouse, Bag ได้ที่นี่'));
+const statusGrid = el('div', {class:'grid', style:'margin-bottom:14px'});
+statusGrid.append(field({
+  id:'borrowStatus', label:'สถานะรายการ (ติ๊ก [ x ] ในชีท "ยืม คืน")', type:'select',
+  options:['ยืม','คืน'], full:true,
+  help:'เลือก "ยืม" = ติ๊ก [ x ] คอลัมน์ยืม / เลือก "คืน" = ติ๊ก [ x ] คอลัมน์คืน (ค่าเริ่มต้น: ยืม)'
+}));
+equipBody.append(statusGrid);
 for (let i=2;i<=6;i++){
   const row = el('div', {class:'equip-row'});
   row.append(el('div', {class:'n'}, String(i)));
@@ -379,6 +386,7 @@ for (let i=2;i<=6;i++){
   equipBody.append(row);
 }
 root.append(collapseCard(6, 'อุปกรณ์ที่ยืมเพิ่มเติม (ไม่บังคับ)', '', [equipBody], false));
+$('#borrowStatus').value = 'ยืม';
 
 // ---- 7. Signature (2 people, locked mapping) ----
 const sigCard = el('div', {class:'card'});
@@ -440,21 +448,42 @@ const sigPads = {}; // { user: {ctx, hasContent}, it: {ctx, hasContent} }
 
 function setupSignaturePad(canvasId, key){
   const cvs = $('#'+canvasId);
-  const ratio = window.devicePixelRatio || 1;
-  const rect = cvs.getBoundingClientRect();
-  cvs.width = rect.width * ratio;
-  cvs.height = rect.height * ratio;
   const ctx = cvs.getContext('2d');
-  ctx.scale(ratio, ratio);
-  ctx.lineWidth = 2.2;
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = '#1c1f26';
   sigPads[key] = { ctx, hasContent:false, canvas:cvs };
+
+  // Size the backing store to the CSS box * devicePixelRatio, then scale the context
+  // by the SAME ratio. If these two ever disagree, drawn strokes drift away from the
+  // cursor - which is exactly what happens if the canvas has no CSS width/height.
+  function resize(){
+    const rect = cvs.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const ratio = window.devicePixelRatio || 1;
+    // preserve existing drawing across a resize
+    let prev = null;
+    if (sigPads[key].hasContent && cvs.width && cvs.height){
+      prev = document.createElement('canvas');
+      prev.width = cvs.width; prev.height = cvs.height;
+      prev.getContext('2d').drawImage(cvs, 0, 0);
+    }
+    cvs.width = Math.round(rect.width * ratio);
+    cvs.height = Math.round(rect.height * ratio);
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.scale(ratio, ratio);
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#1c1f26';
+    if (prev) ctx.drawImage(prev, 0, 0, rect.width, rect.height);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+  sigPads[key].resize = resize;
 
   let drawing = false;
   const pos = (e) => {
     const r = cvs.getBoundingClientRect();
     const t = e.touches ? e.touches[0] : e;
+    // map client coords -> CSS-pixel coords inside the canvas box
     return { x: t.clientX - r.left, y: t.clientY - r.top };
   };
   const start = (e) => { drawing = true; sigPads[key].hasContent = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); e.preventDefault(); };
@@ -582,25 +611,111 @@ $('#btnExport').addEventListener('click', async () => {
       info.getCell('D39').value = null;
     }
 
-    for (let i=2;i<=6;i++){
-      info.getCell('D'+(42+i)).value = v('equip'+i) || null;
+    // Compact the list so entries are contiguous - a gap would break the
+    // running "No." counter on the transfer form (each row adds 1 to the row above).
+    const equipItems = [];
+    for (let i=2;i<=6;i++){ const t = v('equip'+i); if (t) equipItems.push(t); }
+    for (let i=0;i<5;i++){
+      info.getCell('D'+(44+i)).value = equipItems[i] || null;
+    }
+
+    // ============================================================================
+    // CRITICAL: the template ships with CACHED formula results baked in (e.g. the
+    // cell holding =Info!D6 also stores "Name Thai" from when the template was last
+    // saved). Excel trusts that cache and shows the stale value even though we
+    // changed Info!D6. Two defences: force a full recalc on open, and strip every
+    // cached result so no viewer can show stale data.
+    // ============================================================================
+    wb.calcProperties = wb.calcProperties || {};
+    wb.calcProperties.fullCalcOnLoad = true;
+
+    wb.eachSheet(ws => {
+      ws.eachRow({ includeEmpty:false }, row => {
+        row.eachCell({ includeEmpty:false }, cell => {
+          const cv = cell.value;
+          if (cv && typeof cv === 'object' && cv.formula !== undefined && cv.result !== undefined){
+            cell.value = { formula: cv.formula }; // drop the stale cached result
+          }
+        });
+      });
+    });
+
+    // ---- Build the "ยืม คืน" equipment table from what was actually entered ----
+    // Rows 21-27 are pre-formatted. Row 21 is formula-linked to the computer;
+    // rows 22+ are plain text in the real files, so we write them the same way.
+    const COMPANY_CODE = {
+      'Mud & Hound':'MUD', 'ABP Café':'ABP', 'Golden Donuts':'GD',
+      'Golden Scoop':'GS', 'Greyhound':'GH', 'Greyhound Café':'GHC'
+    };
+    const coCode = COMPANY_CODE[v('company')] || v('compBrand') || 'GHC';
+    const isReturn = v('borrowStatus') === 'คืน';
+    const TICK = '[ x ]', BLANK = '[  ]';
+
+    const bs = wb.getWorksheet('ยืม คืน');
+    if (bs){
+      const FIRST = 21, LAST = 27;
+      const total = 1 + equipItems.length; // row 21 is the computer itself
+      for (let r = FIRST; r <= LAST; r++){
+        const idx = r - FIRST;           // 0 = computer row
+        const active = idx < total;
+        if (idx === 0){
+          // computer row keeps its formula links to Info
+          bs.getCell(`A${r}`).value = 1;
+          bs.getCell(`B${r}`).value = { formula: 'Info!D25' };
+          bs.getCell(`C${r}`).value = { formula: 'Info!D22' };
+          bs.getCell(`H${r}`).value = { formula: 'Info!D23' };
+          bs.getCell(`J${r}`).value = coCode;
+          bs.getCell(`K${r}`).value = 1;
+        } else if (active){
+          bs.getCell(`A${r}`).value = idx + 1;
+          bs.getCell(`C${r}`).value = equipItems[idx - 1];
+          bs.getCell(`J${r}`).value = coCode;
+          bs.getCell(`K${r}`).value = 1;
+        } else {
+          // clear template leftovers (Adapter / Mouse / Bag were hardcoded)
+          bs.getCell(`A${r}`).value = null;
+          bs.getCell(`C${r}`).value = null;
+          bs.getCell(`H${r}`).value = null;
+          bs.getCell(`J${r}`).value = null;
+          bs.getCell(`K${r}`).value = null;
+        }
+        bs.getCell(`L${r}`).value = (active && !isReturn) ? TICK : BLANK;
+        bs.getCell(`M${r}`).value = (active &&  isReturn) ? TICK : BLANK;
+      }
+      // สังกัด line (D17) is plain text in the template - keep it in sync
+      bs.getCell('D17').value = `${v('company')} / ${v('department')}`;
     }
 
     // ---- Fix template bugs in "โอนทรัพย์สิน F." (equipment No./Quantity/Total + row5/6 mapping) ----
     const tf = wb.getWorksheet('โอนทรัพย์สิน F.');
     if (tf){
-      tf.getCell('A17').value = { formula: 'IF(ISBLANK(D17),"","1")' };
-      tf.getCell('I17').value = { formula: 'IF(ISBLANK(D17),"",1)' };
-      tf.getCell('I19').value = { formula: 'IF(ISBLANK(D19),"",1)' };
-      tf.getCell('I20').value = { formula: 'IF(ISBLANK(D20),"",1)' };
-      tf.getCell('I21').value = { formula: 'IF(ISBLANK(D21),"",1)' };
-      tf.getCell('D22').value = { formula: 'IF(ISBLANK(Info!D47),"",""&Info!D47)' }; // was wrongly pointing at D48
-      tf.getCell('A22').value = { formula: 'IF(ISBLANK(D22),"",A21+1)' };
-      tf.getCell('I22').value = { formula: 'IF(ISBLANK(D22),"",1)' };
-      tf.getCell('D23').value = { formula: 'IF(ISBLANK(Info!D48),"",""&Info!D48)' }; // was wrongly pointing at non-existent D49
-      tf.getCell('A23').value = { formula: 'IF(ISBLANK(D23),"",A22+1)' };
-      tf.getCell('I23').value = { formula: 'IF(ISBLANK(D23),"",1)' };
+      // The template tested the item cells with ISBLANK(). Those cells hold FORMULAS,
+      // and ISBLANK() is FALSE for a formula returning "" - so every row counted as
+      // filled and printed a No. and Quantity of 1. Compare against "" instead.
+      const ITEM_ROWS = [17, 19, 20, 21, 22, 23];
+      const SRC = { 17:'D43', 19:'D44', 20:'D45', 21:'D46', 22:'D47', 23:'D48' };
+      ITEM_ROWS.forEach((r, i) => {
+        tf.getCell(`D${r}`).value = { formula: `IF(Info!${SRC[r]}="","",""&Info!${SRC[r]})` };
+        tf.getCell(`A${r}`).value = i === 0
+          ? { formula: `IF(D${r}="","",1)` }
+          : { formula: `IF(D${r}="","",A${ITEM_ROWS[i-1]}+1)` };
+        tf.getCell(`I${r}`).value = { formula: `IF(D${r}="","",1)` };
+      });
       tf.getCell('I38').value = { formula: 'SUM(I17,I19,I20,I21,I22,I23)' }; // was a hardcoded "4"
+      // S/N + Type: show nothing rather than a stray 0 when the source cell is empty
+      tf.getCell('G17').value = { formula: 'IF(Info!D23="","",Info!D23)' };
+      tf.getCell('G18').value = { formula: 'IF(Info!D24="","",Info!D24)' };
+    }
+
+    // ---- Blank-safe display formulas on "Accept Regulation (New)" ----
+    // A direct =Info!Dxx reference renders 0 when the source is empty.
+    const arFix = wb.getWorksheet('Accept Regulation (New)');
+    if (arFix){
+      arFix.getCell('E40').value = { formula: 'IF(Info!D24="","",Info!D24)' }; // Type
+      arFix.getCell('E41').value = { formula: 'IF(Info!D25="","",Info!D25)' }; // Code
+      arFix.getCell('F38').value = { formula: 'IF(Info!D23="","",Info!D23)' }; // S/N
+      arFix.getCell('B44').value = { formula: 'IF(Info!D16="","",Info!D16)' }; // Lotus pwd
+      arFix.getCell('B48').value = { formula: 'IF(Info!D18="","",Info!D18)' }; // Webmail pwd
     }
 
     // ---- Optional IT staff name override on Accept Regulation (New) ----
@@ -620,30 +735,48 @@ $('#btnExport').addEventListener('click', async () => {
       anchors.forEach(a => ws.addImage(imgId, a));
     }
 
-    // Accept Regulation (New): ผู้ใช้ (A55) / พนง.IT ผู้ดำเนินการ (D55)
+    // Accept Regulation (New): row 55 holds "ผู้ใช้" (A) and "พนง.IT ผู้ดำเนินการ" (D).
+    // The original row is only 16.5pt tall, leaving nowhere to sign, so give that one
+    // row some height and bottom-align the captions - the signature then sits above
+    // the caption exactly like a hand-signed printout.
+    const arSig = wb.getWorksheet('Accept Regulation (New)');
+    if (arSig && (sigPads.user.hasContent || sigPads.it.hasContent)){
+      arSig.getRow(55).height = 44;
+      ['A55','D55','F55'].forEach(ref => {
+        const c = arSig.getCell(ref);
+        c.alignment = Object.assign({}, c.alignment, { vertical: 'bottom' });
+      });
+    }
     embedSig('user', 'Accept Regulation (New)', [
-      { tl: { col: 0.2, row: 52.3 }, ext: { width: 150, height: 55 } },
+      { tl: { col: 1.02, row: 54.06 }, ext: { width: 128, height: 36 } },
     ]);
     embedSig('it', 'Accept Regulation (New)', [
-      { tl: { col: 3.2, row: 52.3 }, ext: { width: 150, height: 55 } },
+      { tl: { col: 4.02, row: 54.06 }, ext: { width: 116, height: 36 } },
     ]);
 
-    // โอนทรัพย์สิน F.: ผู้รับโอน (col I) = user, ผู้โอน (col F/G) = IT staff
-    embedSig('user', 'โอนทรัพย์สิน F.', [
-      { tl: { col: 8.2, row: 39.2 }, ext: { width: 110, height: 42 } },
-    ]);
+    // โอนทรัพย์สิน F.: signature lines are on row 41 -
+    // G41 = ผู้โอน/Transfer (IT), I41 = ผู้รับโอน/Transfer (user).
+    // Sit the images on rows 39-40 so they rest ON the underline.
     embedSig('it', 'โอนทรัพย์สิน F.', [
-      { tl: { col: 5.2, row: 39.2 }, ext: { width: 110, height: 42 } },
+      { tl: { col: 4.30, row: 38.75 }, ext: { width: 118, height: 38 } },
+    ]);
+    embedSig('user', 'โอนทรัพย์สิน F.', [
+      { tl: { col: 8.45, row: 38.75 }, ext: { width: 118, height: 38 } },
     ]);
 
-    // ยืม คืน: ลายเซ็นผู้ยืม/ผู้คืน (H41 & K41) = user, ลายเซ็นผู้อนุมัติ/ผู้รับคืน (H44 & K44) = IT staff
+    // ยืม คืน: dotted lines at H41/K41 (ผู้ยืม-ผู้คืน = user)
+    // and H44/K44 (ผู้อนุมัติ-ผู้รับคืน = IT staff), under วันยืม / วันคืน columns.
+    // Row 40 (above the first line) is 21.75pt but row 43 is only 9pt, so the second
+    // signature would land on top of its dotted line. Match the heights.
+    const bsSig = wb.getWorksheet('ยืม คืน');
+    if (bsSig && sigPads.it.hasContent) bsSig.getRow(43).height = 21.75;
     embedSig('user', 'ยืม คืน', [
-      { tl: { col: 7.1, row: 40.2 }, ext: { width: 65, height: 26 } },
-      { tl: { col: 10.1, row: 40.2 }, ext: { width: 65, height: 26 } },
+      { tl: { col: 7.05, row: 39.9 },  ext: { width: 88, height: 30 } },
+      { tl: { col: 10.05, row: 39.9 }, ext: { width: 88, height: 30 } },
     ]);
     embedSig('it', 'ยืม คืน', [
-      { tl: { col: 7.1, row: 43.2 }, ext: { width: 65, height: 26 } },
-      { tl: { col: 10.1, row: 43.2 }, ext: { width: 65, height: 26 } },
+      { tl: { col: 7.05, row: 42.9 },  ext: { width: 88, height: 30 } },
+      { tl: { col: 10.05, row: 42.9 }, ext: { width: 88, height: 30 } },
     ]);
 
     // Keep only the 4 requested sheets
